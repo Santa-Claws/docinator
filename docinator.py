@@ -245,6 +245,14 @@ async def document_file(
                     temperature=0.2,
                 )
                 return file_path, response.choices[0].message.content or ""
+            except openai.RateLimitError as e:
+                # insufficient_quota = no credits, retrying won't help
+                if "insufficient_quota" in str(e) or "quota" in str(e).lower():
+                    return file_path, f"*API quota exceeded (add credits to your account): {e}*"
+                if attempt == 0:
+                    await asyncio.sleep(5)
+                else:
+                    return file_path, f"*Rate limit error after retry: {e}*"
             except openai.APIError as e:
                 if attempt == 0:
                     await asyncio.sleep(2)
@@ -262,8 +270,6 @@ async def run_async(
 ) -> list[tuple[Path, str]]:
     client = build_client(cfg)
     semaphore = asyncio.Semaphore(cfg.max_concurrent)
-
-    results: list[tuple[Path, str]] = []
 
     with Progress(
         SpinnerColumn(),
@@ -296,10 +302,10 @@ def write_per_file_output(
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     index_lines = [
-        f"# Documentation Index\n",
+        "# Documentation Index\n",
         f"**Repository**: {repo_url}  \n",
         f"**Generated**: {date.today()}  \n",
-        f"\n## Files\n",
+        "\n## Files\n",
     ]
 
     for file_path, markdown in results:
@@ -322,7 +328,7 @@ def write_single_output(
 ) -> None:
     output_file.parent.mkdir(parents=True, exist_ok=True)
     parts = [
-        f"# Documentation\n\n",
+        "# Documentation\n\n",
         f"**Repository**: {repo_url}  \n",
         f"**Generated**: {date.today()}  \n\n",
         "---\n\n",
