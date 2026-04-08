@@ -1,15 +1,6 @@
 # docinator
 
-Generate exhaustive, developer-grade documentation for any GitHub repository using an LLM. Point it at a repo URL and it reads every source file, sends each one to the model, and writes detailed Markdown docs — either one file per source file (mirroring the repo structure) or a single concatenated file.
-
-## Features
-
-- **Three LLM providers**: OpenAI, OpenRouter, or local Ollama — all via the same OpenAI-compatible API
-- **Free model fallback chain**: when using OpenRouter without a `--model` flag, automatically tries `qwen3-coder → llama-3.3-70b → gemma-3-27b → nemotron-120b` and rotates on overload (503)
-- **Self-throttle**: spaces requests 9s apart to stay under free-tier rate limits (~8 rpm) without hitting 429s
-- **Two output modes**: per-file folder with an `index.md`, or a single concatenated `.md` file
-- **Smart file filtering**: skips binaries, lock files, build artifacts, images, and files over 100KB
-- **Async + concurrent**: up to N simultaneous LLM calls (configurable), with per-request model fallback
+Generate detailed LLM documentation for any GitHub repository.
 
 ## Installation
 
@@ -21,93 +12,59 @@ pip install -r requirements.txt
 
 Requires Python 3.10+ and `git` on PATH.
 
-## Usage
+## Quick start
 
 ```bash
-python docinator.py <github_url> [options]
+# OpenRouter (recommended — free model chain built in)
+python docinator.py https://github.com/user/repo \
+  --provider openrouter \
+  --api-key sk-or-...
+
+# OpenAI
+python docinator.py https://github.com/user/repo \
+  --provider openai \
+  --api-key sk-proj-...
+
+# Local Ollama (no key needed)
+python docinator.py https://github.com/user/repo \
+  --provider ollama \
+  --model llama3
 ```
 
-### Options
+Output goes to `./docs/<repo-name>/` by default — one `.md` per source file plus an `index.md`.
+
+## Output modes
+
+```bash
+# Per-file folder (default)
+python docinator.py <url> --output-mode per-file
+
+# Single concatenated file
+python docinator.py <url> --output-mode single --output ./my-docs.md
+```
+
+## All options
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--provider` | `openai` | `openai`, `openrouter`, or `ollama` |
-| `--model` | see below | Model name. OpenRouter defaults to free chain |
+| `--model` | auto | Model name. OpenRouter defaults to free chain |
 | `--api-key` | env var | Overrides `OPENAI_API_KEY` / `OPENROUTER_API_KEY` |
-| `--base-url` | auto | Override provider base URL (LM Studio, vLLM, etc.) |
-| `--output-mode` | `per-file` | `per-file` (folder) or `single` (one `.md`) |
+| `--base-url` | auto | Override base URL (LM Studio, vLLM, Together AI, etc.) |
+| `--output-mode` | `per-file` | `per-file` or `single` |
 | `--output` | `./docs/<repo>` | Output path |
-| `--max-concurrent` | `3` | Max simultaneous LLM requests |
+| `--max-concurrent` | `3` | Concurrent LLM requests |
 
-### Examples
+## Provider setup
 
-```bash
-# OpenRouter — free model chain, per-file output
-python docinator.py https://github.com/user/repo --provider openrouter --api-key sk-or-...
+**OpenAI** — set `OPENAI_API_KEY` or pass `--api-key`.
 
-# Single output file
-python docinator.py https://github.com/user/repo --provider openrouter --api-key sk-or-... --output-mode single
+**OpenRouter** — set `OPENROUTER_API_KEY` or pass `--api-key`. Without `--model`, docinator cycles through a free model chain (`qwen3-coder → llama-3.3-70b → gemma-3-27b → nemotron-120b`) and rotates automatically on overload.
 
-# Specific model
-python docinator.py https://github.com/user/repo --provider openrouter \
-  --model qwen/qwen3-coder:free --api-key sk-or-...
+**Ollama** — just have Ollama running locally. No key required.
 
-# OpenAI
-python docinator.py https://github.com/user/repo --provider openai \
-  --model gpt-4o-mini --api-key sk-proj-...
+**Custom endpoint** — use `--base-url` to point at any OpenAI-compatible server.
 
-# Local Ollama (no API key needed)
-python docinator.py https://github.com/user/repo --provider ollama --model llama3
+## Free tier tips
 
-# Custom OpenAI-compatible endpoint (LM Studio, vLLM, Together AI, etc.)
-python docinator.py https://github.com/user/repo \
-  --base-url http://localhost:1234/v1 --model my-model --api-key any
-```
-
-### Environment variables
-
-```bash
-export OPENAI_API_KEY=sk-proj-...
-export OPENROUTER_API_KEY=sk-or-...
-```
-
-## Output structure
-
-### Per-file mode (default)
-
-```
-docs/
-└── repo-name/
-    ├── index.md            # table of contents with relative links
-    ├── README.md.md
-    └── src/
-        ├── main.py.md
-        └── utils/
-            └── helpers.py.md
-```
-
-### Single-file mode
-
-```
-docs/repo-name.md
-```
-
-Each file section is headed by `# path/to/file` and separated by `---`.
-
-## What each doc contains
-
-For every source file the LLM produces:
-
-1. **Overview** — 2–5 sentence summary of the file's role and design decisions
-2. **Line-by-line annotation** — every import, constant, class, function, loop, and expression explained: what it does, why it exists, inputs/outputs, edge cases
-3. **Data flow** — how data enters, transforms, and exits the file
-4. **Dependencies and coupling** — role of each import, implicit coupling to other modules
-5. **Potential issues** — fragile patterns, magic numbers, non-obvious gotchas
-
-## Free tier notes
-
-OpenRouter free models are limited to ~8 requests/minute and ~50 requests/day per account. docinator self-throttles at 9s between requests and rotates through 4 free models on overload. For larger repos, add credits to your OpenRouter account (`--model` any paid model).
-
-## Skipped files
-
-docinator ignores: `.git`, `node_modules`, `__pycache__`, `dist`, `build`, virtual envs, binary files, images, fonts, lock files (`package-lock.json`, `poetry.lock`, etc.), compiled artifacts, and files over 100KB.
+OpenRouter free models cap at ~8 requests/minute and ~50/day. docinator self-throttles to stay under the rpm limit. For larger repos, add credits to your OpenRouter account or use a paid model.
