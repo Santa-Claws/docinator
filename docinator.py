@@ -2,12 +2,13 @@
 """docinator — Generate detailed LLM documentation for any GitHub repository."""
 
 import argparse
+import time
 import asyncio
 import os
 import shutil
 import subprocess
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
 
@@ -57,6 +58,15 @@ EXTENSION_LANGUAGE = {
     ".clj": "clojure", ".hs": "haskell", ".ml": "ocaml",
     ".dockerfile": "dockerfile",
 }
+
+# Free OpenRouter models used as fallback chain when primary is overloaded.
+# Ordered by quality for code documentation tasks.
+FREE_MODEL_CHAIN = [
+    "qwen/qwen3-coder:free",           # 262K ctx, code-specialized
+    "meta-llama/llama-3.3-70b-instruct:free",  # 65K ctx, reliable
+    "google/gemma-3-27b-it:free",      # 131K ctx
+    "nvidia/nemotron-3-super-120b-a12b:free",  # 262K ctx
+]
 
 # ---------------------------------------------------------------------------
 # LLM prompt
@@ -136,7 +146,7 @@ Do not truncate. Document every line or logical group.
 @dataclass
 class Config:
     provider: str
-    model: str
+    models: list[str]  # primary first; fallbacks follow
     api_key: str
     base_url: str | None
     max_concurrent: int
@@ -216,7 +226,7 @@ def clone_repo(url: str, target_dir: Path) -> None:
 
 async def document_file(
     client: openai.AsyncOpenAI,
-    model: str,
+    models: list[str],
     repo_url: str,
     repo_root: Path,
     file_path: Path,
@@ -237,29 +247,41 @@ async def document_file(
             file_contents=contents,
         )
 
-        for attempt in range(2):
-            try:
-                response = await client.chat.completions.create(
-                    model=model,
-                    messages=[{"role": "user", "content": prompt}],
-                    temperature=0.2,
-                )
-                return file_path, response.choices[0].message.content or ""
-            except openai.RateLimitError as e:
-                # insufficient_quota = no credits, retrying won't help
-                if "insufficient_quota" in str(e) or "quota" in str(e).lower():
-                    return file_path, f"*API quota exceeded (add credits to your account): {e}*"
-                if attempt == 0:
-                    await asyncio.sleep(5)
-                else:
-                    return file_path, f"*Rate limit error after retry: {e}*"
-            except openai.APIError as e:
-                if attempt == 0:
-                    await asyncio.sleep(2)
-                else:
-                    return file_path, f"*LLM error after retry: {e}*"
+        # Try each model in the chain. On 503 (overloaded) rotate immediately
+        # to the next model. On 429 (rate limit) retry the same model twice
+        # with a short wait before rotating. Three clean attempts per model.
+        for model in models:
+            for attempt in range(3):
+                try:
+                    response = await client.chat.completions.create(
+                        model=model,
+                        messages=[{"role": "user", "content": prompt}],
+                        temperature=0.2,
+                    )
+                    return file_path, response.choices[0].message.content or ""
 
-    return file_path, "*Unknown error*"
+                except openai.RateLimitError as e:
+                    msg = str(e)
+                    if "insufficient_quota" in msg or "quota" in msg.lower():
+                        return file_path, f"*API quota exceeded: {e}*"
+                    if attempt < 2:
+                        await asyncio.sleep(20)  # short wait, then retry same model
+                    # on 3rd fail, outer loop moves to next model
+
+                except openai.APIStatusError as e:
+                    if e.status_code == 503:
+                        break  # overloaded — skip remaining attempts, try next model
+                    if attempt < 2:
+                        await asyncio.sleep(5)
+                    # on 3rd fail, outer loop moves to next model
+
+                except openai.APIError as e:
+                    if attempt < 2:
+                        await asyncio.sleep(5)
+                    else:
+                        return file_path, f"*LLM error: {e}*"
+
+        return file_path, f"*All models exhausted ({', '.join(models)})*"
 
 
 async def run_async(
@@ -280,8 +302,18 @@ async def run_async(
     ) as progress:
         task = progress.add_task("Documenting files...", total=len(files))
 
+        # Self-throttle: stagger request launches so we stay under free-tier
+        # rate limits (typically ~8 rpm). 9s gap = ~6.5 rpm safely.
+        request_gate = asyncio.Semaphore(1)
+        last_request_time: list[float] = [0.0]
+
         async def worker(fp: Path) -> tuple[Path, str]:
-            result = await document_file(client, cfg.model, repo_url, repo_root, fp, semaphore)
+            async with request_gate:
+                elapsed = time.monotonic() - last_request_time[0]
+                if elapsed < 9.0 and last_request_time[0] > 0:
+                    await asyncio.sleep(9.0 - elapsed)
+                last_request_time[0] = time.monotonic()
+            result = await document_file(client, cfg.models, repo_url, repo_root, fp, semaphore)
             progress.advance(task)
             return result
 
@@ -377,8 +409,11 @@ def main() -> None:
     )
     parser.add_argument(
         "--model",
-        default="gpt-4o-mini",
-        help="Model name (default: gpt-4o-mini)",
+        default=None,
+        help=(
+            "Primary model name. For OpenRouter, defaults to a free model chain: "
+            + " -> ".join(FREE_MODEL_CHAIN)
+        ),
     )
     parser.add_argument("--api-key", help="API key (overrides env vars)")
     parser.add_argument("--base-url", help="Override provider base URL")
@@ -395,8 +430,8 @@ def main() -> None:
     parser.add_argument(
         "--max-concurrent",
         type=int,
-        default=5,
-        help="Max concurrent LLM requests (default: 5)",
+        default=3,
+        help="Max concurrent LLM requests (default: 3)",
     )
     args = parser.parse_args()
 
@@ -405,9 +440,23 @@ def main() -> None:
         console.print("[red]Error:[/red] No API key provided. Use --api-key or set OPENAI_API_KEY.")
         raise SystemExit(1)
 
+    # Build model list: user-specified model goes first, then free chain as fallbacks
+    if args.model:
+        if args.provider == "openrouter":
+            models = [args.model] + [m for m in FREE_MODEL_CHAIN if m != args.model]
+        else:
+            models = [args.model]
+    elif args.provider == "openrouter":
+        models = list(FREE_MODEL_CHAIN)
+    else:
+        models = ["gpt-4o-mini"]
+
+    if len(models) > 1:
+        console.print(f"[dim]Model chain: {' -> '.join(models)}[/dim]")
+
     cfg = Config(
         provider=args.provider,
-        model=args.model,
+        models=models,
         api_key=api_key,
         base_url=args.base_url,
         max_concurrent=args.max_concurrent,
@@ -436,6 +485,10 @@ def main() -> None:
             return
 
         results = asyncio.run(run_async(files, tmpdir, args.url, cfg))
+
+        errors = sum(1 for _, md in results if md.startswith("*") and md.endswith("*"))
+        if errors:
+            console.print(f"[yellow]Warning:[/yellow] {errors}/{len(results)} files had errors")
 
         if args.output_mode == "per-file":
             write_per_file_output(results, tmpdir, output_path, args.url)
