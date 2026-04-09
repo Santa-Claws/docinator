@@ -306,17 +306,19 @@ async def run_async(
     ) as progress:
         task = progress.add_task("Documenting files...", total=len(files))
 
-        # Self-throttle: stagger request launches so we stay under free-tier
-        # rate limits (typically ~8 rpm). 9s gap = ~6.5 rpm safely.
+        # Self-throttle: stagger request launches so we stay under OpenRouter
+        # free-tier rate limits (typically ~8 rpm). 9s gap = ~6.5 rpm safely.
+        # Not needed for ollama or openai.
         request_gate = asyncio.Semaphore(1)
         last_request_time: list[float] = [0.0]
 
         async def worker(fp: Path) -> tuple[Path, str]:
-            async with request_gate:
-                elapsed = time.monotonic() - last_request_time[0]
-                if elapsed < 9.0 and last_request_time[0] > 0:
-                    await asyncio.sleep(9.0 - elapsed)
-                last_request_time[0] = time.monotonic()
+            if cfg.provider == "openrouter":
+                async with request_gate:
+                    elapsed = time.monotonic() - last_request_time[0]
+                    if elapsed < 9.0 and last_request_time[0] > 0:
+                        await asyncio.sleep(9.0 - elapsed)
+                    last_request_time[0] = time.monotonic()
             result = await document_file(client, cfg.models, repo_url, repo_root, fp, semaphore)
             progress.advance(task)
             return result
