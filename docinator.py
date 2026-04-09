@@ -259,7 +259,9 @@ async def document_file(
                         temperature=0.2,
                     )
                     if not response.choices:
-                        break  # empty response — try next model
+                        if attempt < 2:
+                            await asyncio.sleep(5)
+                        continue  # treat as transient — retry, rotate after 3 fails
                     return file_path, response.choices[0].message.content or ""
 
                 except openai.RateLimitError as e:
