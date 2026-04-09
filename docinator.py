@@ -258,6 +258,8 @@ async def document_file(
                         messages=[{"role": "user", "content": prompt}],
                         temperature=0.2,
                     )
+                    if not response.choices:
+                        break  # empty response — try next model
                     return file_path, response.choices[0].message.content or ""
 
                 except openai.RateLimitError as e:
