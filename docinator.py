@@ -266,7 +266,7 @@ async def document_file(
 
                 except openai.RateLimitError as e:
                     msg = str(e)
-                    if "insufficient_quota" in msg or "quota" in msg.lower():
+                    if "insufficient_quota" in msg or "quota" in msg.lower() or "per-day" in msg or "per_day" in msg:
                         return file_path, f"*API quota exceeded: {e}*"
                     if attempt < 2:
                         await asyncio.sleep(20)  # short wait, then retry same model
